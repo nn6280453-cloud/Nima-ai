@@ -19,7 +19,7 @@ app = Flask(__name__, template_folder="templates")
 # ------------------------------------------------------------------
 # 1️⃣  Load your OpenRouter API key
 # ------------------------------------------------------------------
-API_KEY = os.getenv("OPENROUTER_API_KEY")
+API_KEY = os.getenv("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")
 if not API_KEY:
     logging.error("OPENROUTER_API_KEY env var is missing!")
     # We’ll still start the server – the /ask route will fail gracefully
