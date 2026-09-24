@@ -1,10 +1,8 @@
 from flask import Flask, request, jsonify, render_template
 import requests
 import os
-import logging
 
-app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+app = Flask(__name__, template_folder='templates')
 
 API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
@@ -18,17 +16,12 @@ def ask():
     if not user_input:
         return jsonify({"error": "Empty message"}), 400
 
-    # Optional: Add jailbreak system prompt if needed
-    system_prompt = "You are NIMA AI, a helpful assistant."
-
     payload = {
         "model": "deepseek/deepseek-r1",
         "messages": [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": "You are NIMA AI, a helpful assistant."},
             {"role": "user", "content": user_input}
-        ],
-        "temperature": 0.7,
-        "max_tokens": 1000
+        ]
     }
 
     headers = {
@@ -43,20 +36,10 @@ def ask():
             headers=headers,
             timeout=60
         )
-        app.logger.info(f"OpenRouter response status: {r.status_code}")
-        app.logger.info(f"OpenRouter response body: {r.text[:500]}")
-        
-        if r.status_code != 200:
-            return jsonify({
-                "error": f"API error {r.status_code}",
-                "details": r.json().get("error", {}).get("message", "No details")
-            }), r.status_code
-        
+        r.raise_for_status()  # Raise an error for bad status codes
         return jsonify(r.json())
-    
     except requests.exceptions.RequestException as e:
-        app.logger.error(f"Request failed: {str(e)}")
-        return jsonify({"error": "Request to OpenRouter failed", "details": str(e)}), 500
+        return jsonify({"error": f"Request failed: {str(e)}"}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
