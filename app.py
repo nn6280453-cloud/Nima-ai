@@ -1,68 +1,128 @@
-/* ==================== app.js ==================== */
-/*  Minimal Express server that: 1) mounts the bot router
- * 2) exposes a /ask endpoint that talks to OpenRouter
- * 3) has global error handling
- */
+# ----------------------------------------------------
+# app.py
+# ----------------------------------------------------
+import os
+import json
+import logging
+import requests
+from flask import Flask, request, jsonify, abort
 
-require('dotenv').config();          // loads .env file if present
-const express = require('express');
-const axios   = require('axios');
-const botRouter = require('./botRouter');
+# -----------------------------------------------------------------
+# 1️⃣  Configuration & logging
+# -----------------------------------------------------------------
+app = Flask(__name__)
 
-const app = express();
+# Log everything to stdout – Render collects this automatically
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    handlers=[logging.StreamHandler()]
+)
 
-/* 1️⃣  body‑parsing middleware – required for POST /ask  */
-app.use(express.json());          // parses application/json
-app.use(express.urlencoded({ extended: true }));  // parses application/x-www-form-urlencoded
+# -----------------------------------------------------------------
+# 2️⃣  Helper: fetch the OpenRouter API key
+# -----------------------------------------------------------------
+def get_openrouter_key() -> str:
+    """
+    Returns the OpenRouter API key.
+    1. Looks for OPENROUTER_API_KEY in the environment.
+    2. If not found, falls back to the hard‑coded key you supplied.
+    """
+    key = os.getenv("OPENROUTER_API_KEY")
+    if key:
+        return key
+    # Hard‑coded key – **only for quick testing**.
+    # In production, delete this line and set OPENROUTER_API_KEY in env.
+    return "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"
 
-/* 2️⃣  mount the WhatsApp‑bot router – keep your existing code  */
-app.use('/api', botRouter);       // all paths inside botRouter start with /api/
+OPENROUTER_KEY = get_openrouter_key()
 
-/* 3️⃣  /ask – simple LLM proxy  */
-app.post('/ask', async (req, res) => {
-  try {
-    const { message } = req.body;
-    if (!message) {
-      return res.status(400).json({ error: 'Missing "message" in request body' });
+# -----------------------------------------------------------------
+# 3️⃣  /ask endpoint – forwards user messages to OpenRouter
+# -----------------------------------------------------------------
+@app.route("/ask", methods=["POST"])
+def ask():
+    """
+    Expected JSON body:
+    {
+        "message": "Your question here"
+    }
+    Returns:
+    {
+        "reply": "OpenRouter answer"
+    }
+    """
+    # 3.1  Validate request body
+    if not request.is_json:
+        logging.warning("Non‑JSON request received")
+        return jsonify({"error": "Request must be JSON"}), 400
+
+    data = request.get_json(silent=True)
+    if not data or "message" not in data:
+        logging.warning("Missing 'message' key in JSON")
+        return jsonify({"error": "Missing 'message' field"}), 400
+
+    user_message = data["message"]
+    logging.info(f"Received /ask request – user message: {user_message}")
+
+    # 3.2  Prepare the OpenRouter payload
+    payload = {
+        "model": "deepseek/deepseek-r1",  # you can change the model if you want
+        "messages": [
+            {"role": "system", "content": "You are NIMA AI, a helpful cybersecurity assistant."},
+            {"role": "user", "content": user_message}
+        ],
+        "max_tokens": 1024
     }
 
-    /* ----------  OpenRouter call  ---------- */
-    const payload = {
-      model: 'deepseek/deepseek-r1',          // you can change this if you wish
-      messages: [{ role: 'user', content: message }],
-      max_tokens: 1024
-    };
-
-    const headers = {
-      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY || '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'}`, // <-- key
-      'Content-Type': 'application/json'
-    };
-
-    const response = await axios.post(
-      'https://openrouter.ai/api/v1/chat/completions',
-      payload,
-      { headers, timeout: 60000 }          // 60‑second timeout
-    );
-
-    if (!response.data?.choices?.[0]?.message?.content) {
-      throw new Error('OpenRouter response missing reply');
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_KEY}",
+        "Content-Type": "application/json"
     }
 
-    res.json({ reply: response.data.choices[0].message.content });
+    try:
+        # 3.3  Call OpenRouter
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=60  # 60 s timeout – adjust as needed
+        )
+        response.raise_for_status()  # raises HTTPError for 4xx/5xx
 
-  } catch (err) {
-    console.error('POST /ask error:', err);
-    /* 4️⃣  return a clean JSON error to the client  */
-    res.status(500).json({ error: err.message || 'Internal server error' });
-  }
-});
+        resp_json = response.json()
+        reply = resp_json.get("choices", [{}])[0].get("message", {}).get("content")
 
-/* 5️⃣  global error handler (optional but nice for uncaught errors) */
-app.use((err, req, res, next) => {
-  console.error('Uncaught error:', err);
-  res.status(500).json({ error: 'Unexpected server error' });
-});
+        if reply is None:
+            raise ValueError("OpenRouter response missing reply text")
 
-/* 6️⃣  start listening  */
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server listening on port ${PORT}`));
+        logging.info("OpenRouter reply received")
+        return jsonify({"reply": reply})
+
+    except requests.exceptions.RequestException as e:
+        # network error, timeout, bad status code, etc.
+        logging.error(f"OpenRouter request failed: {e}")
+        return jsonify({"error": "Failed to contact OpenRouter"}), 502
+    except (ValueError, KeyError, IndexError) as e:
+        # malformed response
+        logging.error(f"OpenRouter response parsing error: {e}")
+        return jsonify({"error": "OpenRouter returned an unexpected response"}), 502
+    except Exception as e:
+        # catch‑all for any other bug
+        logging.exception("Unexpected error in /ask")
+        return jsonify({"error": "Internal server error"}), 500
+
+# -----------------------------------------------------------------
+# 4️⃣  Optional health‑check route (helps Render / Heroku etc.)
+# -----------------------------------------------------------------
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+
+# -----------------------------------------------------------------
+# 5️⃣  Run the Flask app locally (for dev)
+# -----------------------------------------------------------------
+if __name__ == "__main__":
+    # Render expects the app to listen on the port defined in the env
+    port = int(os.getenv("PORT", 10000))  # Render defaults to 10000
+    app.run(host="0.0.0.0", port=port)
